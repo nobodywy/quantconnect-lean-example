@@ -223,9 +223,12 @@ GROUPS = [
 
 
 def build_report(date_str, results):
+    now_utc = datetime.utcnow()
+    now_bj = now_utc + timedelta(hours=8)
     out = []
     out.append(f"# 🇺🇸 美股 AI 板块收盘报告")
-    out.append(f"**{date_str}** · {datetime.utcnow().strftime('%H:%M UTC')}")
+    out.append(f"📅 **{date_str}**（美股交易日）")
+    out.append(f"⏰ 生成时间：{now_utc.strftime('%H:%M')} UTC · 北京时间 {now_bj.strftime('%H:%M')}")
     out.append("")
 
     for title, group_key in GROUPS:
@@ -288,7 +291,10 @@ def build_report(date_str, results):
 
     out.append("")
     out.append("---")
-    out.append(f"*Yahoo Finance · 自动生成 · {len(results)}/{len(WATCHLIST)} 只 · 仅供参考*")
+    out.append(f"🔗 数据源：Yahoo Finance")
+    out.append(f"📊 覆盖：{len(results)}/{len(WATCHLIST)} 只标的")
+    out.append(f"🕐 数据拉取：{now_utc.strftime('%Y-%m-%d %H:%M')} UTC / {now_bj.strftime('%Y-%m-%d %H:%M')} 北京时间")
+    out.append(f"⚠️ 仅供参考，不构成投资建议")
     return "\n".join(out)
 
 
