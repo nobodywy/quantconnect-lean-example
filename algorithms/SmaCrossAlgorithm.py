@@ -20,6 +20,7 @@ class SmaCrossAlgorithm(QCAlgorithm):
     FAST_PERIOD   = 20
     MEDIUM_PERIOD = 50
     SLOW_PERIOD   = 100
+    TREND_PERIOD  = 200            # 200 SMA macro trend filter
 
     ATR_PERIOD          = 14
     ATR_STOP_MULTIPLIER = 2.0         # trailing stop = entry - N*ATR
@@ -27,6 +28,10 @@ class SmaCrossAlgorithm(QCAlgorithm):
     MAX_POSITIONS     = 10            # at most N open positions
     RISK_PER_POSITION = 0.01          # 1 % of portfolio per trade
     HEAT_CAP          = 0.50          # max 50 % of portfolio invested
+
+    # macro filter
+    MACRO_SYMBOL       = "SPY"        # benchmark for 200 MA filter
+    ENABLE_MACRO_FILTER = True        # only trade when SPY > 200 SMA
 
     # universe filter
     UNIVERSE_COUNT     = 50           # consider top 50 by dollar volume
@@ -46,6 +51,12 @@ class SmaCrossAlgorithm(QCAlgorithm):
 
         # benchmark
         self.SetBenchmark("SPY")
+
+        # ── macro trend filter (200 SMA on SPY) ────────────────────
+        if self.ENABLE_MACRO_FILTER:
+            self.AddEquity(self.MACRO_SYMBOL, Resolution.Daily)
+            self.__macro_sma = self.SMA(
+                self.MACRO_SYMBOL, self.TREND_PERIOD, Resolution.Daily)
 
         # ── coarse universe ────────────────────────────────────────
         self.AddUniverse(self.CoarseSelection)
@@ -108,6 +119,17 @@ class SmaCrossAlgorithm(QCAlgorithm):
             self.Debug("History is empty; skipping rebalance")
             return
 
+        # ── macro trend filter (SPY > 200 SMA) ────────────────────
+        if self.ENABLE_MACRO_FILTER and self.__macro_sma.IsReady:
+            spy_price = self.Securities[self.MACRO_SYMBOL].Price
+            spy_trend = self.__macro_sma.Current.Value
+            if spy_price <= spy_trend:
+                self.Debug(f"Macro filter OFF: SPY {spy_price:.2f} "
+                           f"≤ 200 SMA {spy_trend:.2f}")
+                return  # don't trade below 200 SMA
+            self.Debug(f"Macro filter ON: SPY {spy_price:.2f} "
+                       f"> 200 SMA {spy_trend:.2f}")
+
         for symbol in self.__universe_symbols:
             if self.Portfolio[symbol].Invested:
                 continue
@@ -129,10 +151,21 @@ class SmaCrossAlgorithm(QCAlgorithm):
             fast_sma   = closes.rolling(self.FAST_PERIOD).mean().iloc[-1]
             medium_sma = closes.rolling(self.MEDIUM_PERIOD).mean().iloc[-1]
             slow_sma   = closes.rolling(self.SLOW_PERIOD).mean().iloc[-1]
+            trend_sma  = closes.rolling(self.TREND_PERIOD).mean().iloc[-1] \
+                         if len(closes) >= self.TREND_PERIOD else None
 
-            # entry signal: fast > medium > slow
+            # entry signal: fast > medium > slow (bullish alignment)
             if fast_sma <= medium_sma or medium_sma <= slow_sma:
                 continue
+
+            # optional: per-symbol 200 SMA filter (price > 200 SMA)
+            if trend_sma is not None and closes.iloc[-1] <= trend_sma:
+                continue
+
+            # Golden Cross check: fast just crossed above trend (optional)
+            # prev_fast = closes.rolling(self.FAST_PERIOD).mean().iloc[-2]
+            # prev_trend = closes.rolling(self.TREND_PERIOD).mean().iloc[-2]
+            # golden_cross = prev_fast <= prev_trend and fast_sma > trend_sma
 
             # ── ATR for sizing ──────────────────────────────────────
             atr = self._calc_atr(closes)
@@ -152,7 +185,9 @@ class SmaCrossAlgorithm(QCAlgorithm):
             self.Debug(
                 f"ENTRY {symbol.Value} | Price={price:.2f} "
                 f"Size={size} | Fast={fast_sma:.2f} "
-                f"Med={medium_sma:.2f} Slow={slow_sma:.2f} | ATR={atr:.2f}"
+                f"Med={medium_sma:.2f} Slow={slow_sma:.2f} "
+                f"Trend200={trend_sma:.2f}" + (
+                    f" | ATR={atr:.2f}" if atr else "")
             )
 
     # ── exit logic (daily check) ──────────────────────────────────────
