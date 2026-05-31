@@ -1,337 +1,320 @@
 #!/usr/bin/env python3
 """
-美股 AI 板块每日收盘报告生成器
+美股 AI 板块收盘报告 — 纯标准库版 (OpenClaw sandbox 原生可用)
+
+零 pip 依赖 · Python 3 stdlib only
+数据源: Yahoo Finance chart API (免 key, 免注册)
 
 用法:
-  python3 scripts/report-bot/daily-report.py              # 输出到终端
-  python3 scripts/report-bot/daily-report.py --save       # 保存到 reports/
-  python3 scripts/report-bot/daily-report.py --today 2026-05-30  # 指定日期
+  python3 daily-report.py              # 完整 Markdown 报告
+  python3 daily-report.py --tickers NVDA,SPY,LITE   # 只看指定标的
 
-依赖:
-  pip install yfinance pandas numpy
-
-在 macOS 上设置定时:
-  # 编辑 crontab: crontab -e
-  # 美股收盘后运行（16:30 ET = 4:30 AM UTC+8 = 20:30 UTC）
-  30 20 * * 1-5 cd ~/quantconnect-lean-example && python3 scripts/report-bot/daily-report.py --save
+OpenClaw cron 集成:
+  在项目配置中添加 cron，美股收盘后触发，脚本输出 → feishu 消息发送
 """
 
 import sys
-import os
 import json
+import math
+import time
+import urllib.request
 from datetime import datetime, timedelta
-from collections import defaultdict
-from pathlib import Path
-
-try:
-    import yfinance as yf
-    import pandas as pd
-    import numpy as np
-except ImportError:
-    print("❌ 缺少依赖，请先安装:")
-    print("   pip install yfinance pandas numpy")
-    sys.exit(1)
 
 # ── 配置 ─────────────────────────────────────────────
-ROOT = Path(__file__).resolve().parent.parent.parent
-REPORT_DIR = ROOT / "reports"
-TICKERS_MODULE = ROOT / "scripts" / "report-bot" / "tickers.py"
 
-# SMA 周期
+WATCHLIST = {
+    # 大盘基准
+    "SPY":  {"name": "标普 500",         "group": "benchmarks"},
+    "QQQ":  {"name": "纳斯达克 100",     "group": "benchmarks"},
+
+    # AI 核心龙头
+    "NVDA": {"name": "NVIDIA",           "group": "ai"},
+    "AVGO": {"name": "Broadcom",         "group": "ai"},
+    "AMD":  {"name": "AMD",              "group": "ai"},
+    "MSFT": {"name": "Microsoft",        "group": "ai"},
+    "GOOGL":{"name": "Alphabet",         "group": "ai"},
+    "AMZN": {"name": "Amazon",           "group": "ai"},
+    "META": {"name": "Meta",             "group": "ai"},
+    "ORCL": {"name": "Oracle",           "group": "ai"},
+    "PLTR": {"name": "Palantir",         "group": "ai"},
+    "ANET": {"name": "Arista",           "group": "ai"},
+
+    # 半导体
+    "ASML": {"name": "ASML 光刻机",      "group": "semi"},
+    "QCOM": {"name": "Qualcomm",         "group": "semi"},
+    "TSM":  {"name": "台积电",           "group": "semi"},
+    "INTC": {"name": "Intel",            "group": "semi"},
+    "ON":   {"name": "ON Semi",          "group": "semi"},
+
+    # 光通信
+    "LITE": {"name": "Lumentum",         "group": "optical"},
+    "CIEN": {"name": "Ciena",            "group": "optical"},
+    "GLW":  {"name": "Corning",          "group": "optical"},
+    "COHR": {"name": "Coherent",         "group": "optical"},
+
+    # 存储
+    "MU":   {"name": "Micron",           "group": "storage"},
+    "SNDK": {"name": "SanDisk",          "group": "storage"},
+    "WDC":  {"name": "WD",               "group": "storage"},
+    "STX":  {"name": "Seagate",          "group": "storage"},
+
+    # AI ETF
+    "SMH":  {"name": "半导体 ETF",       "group": "etfs"},
+    "AIQ":  {"name": "AI 大数据 ETF",    "group": "etfs"},
+    "QTUM": {"name": "量子计算 ETF",     "group": "etfs"},
+    "AIPI": {"name": "AI 备兑 ETF",      "group": "etfs"},
+}
+
 SMA_PERIODS = [20, 50, 200]
-
-# ── 加载 ticker 配置 ──────────────────────────────────
-import importlib.util
-spec = importlib.util.spec_from_file_location("tickers", TICKERS_MODULE)
-tickers_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(tickers_mod)
-WATCHLIST = tickers_mod.WATCHLIST
-
-# ── 工具函数 ──────────────────────────────────────────
-
-def emoji_for_change(pct):
-    """根据涨跌幅返回 emoji"""
-    if pct > 5:   return "🔥"
-    if pct > 2:   return "🟢"
-    if pct > 0:   return "🟢"
-    if pct > -2:  return "🔴"
-    if pct > -5:  return "🔴"
-    return  "🩸"
+YAHOO_API = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
+UA = "Mozilla/5.0 (compatible; OpenClaw/1.0)"
 
 
-def format_price(val):
-    """智能格式化价格"""
-    if pd.isna(val):
-        return "—"
-    return f"${val:,.2f}"
+# ── 数据获取 (Yahoo Finance chart API) ────────────────
 
-
-def format_pct(val):
-    """格式化百分比"""
-    if pd.isna(val):
-        return "—"
-    sign = "+" if val > 0 else ""
-    return f"{sign}{val:+.2f}%"
-
-
-def compute_smas(df, periods):
-    """计算 SMA 值"""
-    result = {}
-    for p in periods:
-        if len(df) >= p:
-            result[p] = df['Close'].rolling(p).mean().iloc[-1]
-        else:
-            result[p] = None
-    return result
-
-
-def compute_volume_ratio(df):
-    """当日成交量 vs 20日均量"""
-    if len(df) < 22:
+def fetch(ticker):
+    """拉取 1 年日线，返回 { closes, opens, highs, lows, volumes, timestamps }"""
+    url = YAHOO_API.format(ticker=ticker)
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                                "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            d = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"  ⚠️ {ticker}: 请求失败 — {e}", file=sys.stderr)
         return None
-    today_vol = df['Volume'].iloc[-1]
-    avg_vol = df['Volume'].rolling(20).mean().iloc[-2]  # 不含当日
-    if avg_vol > 0:
-        return today_vol / avg_vol
-    return None
 
+    result = (d.get("chart", {}).get("result") or [None])[0]
+    if not result:
+        print(f"  ⚠️ {ticker}: 无数据", file=sys.stderr)
+        return None
 
-# ── 主逻辑 ─────────────────────────────────────────────
+    meta = result.get("meta", {})
+    quotes = (result.get("indicators", {}).get("quote") or [None])[0]
+    if not quotes:
+        return None
 
-def fetch_all(tickers_meta, end_date=None):
-    """批量拉取数据"""
-    if end_date is None:
-        end_date = datetime.now().strftime("%Y-%m-%d")
+    closes = [v for v in (quotes.get("close") or []) if v is not None]
+    if len(closes) < 2:
+        return None
 
-    # 拉足够多数据用于 SMA 200
-    start_date = (datetime.strptime(end_date, "%Y-%m-%d")
-                  - timedelta(days=300)).strftime("%Y-%m-%d")
-
-    symbols = list(tickers_meta.keys())
-
-    print(f"📡 拉取 {len(symbols)} 只标的数据 ({start_date} → {end_date}) ...")
-    data = yf.download(
-        symbols,
-        start=start_date,
-        end=end_date,
-        progress=False,
-        auto_adjust=True
-    )
-
-    return data, end_date
-
-
-def build_report(data, end_date):
-    """生成报告"""
-    lines = []
-    lines.append(f"# 🇺🇸 美股 AI 板块收盘报告")
-    lines.append(f"**{end_date}**  (生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')})")
-    lines.append("")
-
-    # ── 大盘概览 ────────────────────────────────────
-    spy_pct = None
-    qqq_pct = None
-    lines.append("## 📊 大盘基准")
-    lines.append("")
-    lines.append("| 标的 | 收盘价 | 日涨跌 | SMA 20 | SMA 50 | SMA 200 | 量比 | 趋势 |")
-    lines.append("|------|--------|--------|--------|--------|---------|------|------|")
-
-    for sym in ["SPY", "QQQ"]:
-        try:
-            df = data['Close'][sym].dropna()
-            row = build_stock_row(sym, data, df)
-            lines.append(row)
-            if sym == "SPY" and df is not None:
-                spy_pct = (df.iloc[-1] / df.iloc[-2] - 1) * 100
-            if sym == "QQQ" and df is not None:
-                qqq_pct = (df.iloc[-1] / df.iloc[-2] - 1) * 100
-        except KeyError:
-            lines.append(f"| {sym} | — | — | — | — | — | — | — |")
-
-    lines.append("")
-
-    # ── 各组板块 ────────────────────────────────────
-    groups = {
-        "ai_stocks":      ("🧠 AI 核心龙头", []),
-        "semiconductors": ("🔬 半导体", []),
-        "optical":        ("📡 光通信", []),
-        "storage":        ("💾 存储", []),
-        "etfs":           ("📦 AI / 半导体 ETF", []),
+    return {
+        "closes": closes,
+        "opens":  quotes.get("open") or [],
+        "highs":  quotes.get("high") or [],
+        "lows":   quotes.get("low") or [],
+        "volumes": quotes.get("volume") or [],
+        "timestamps": result.get("timestamp") or [],
+        "meta_price": meta.get("regularMarketPrice"),
+        "meta_prev_close": meta.get("chartPreviousClose"),
     }
 
-    for sym, meta in WATCHLIST.items():
-        group = meta['group']
-        if group in groups:
-            groups[group][1].append(sym)
 
-    for key, (title, syms) in groups.items():
-        if not syms:
+# ── 指标计算 ─────────────────────────────────────────
+
+def sma(values, period):
+    if len(values) < period:
+        return None
+    return sum(values[-period:]) / period
+
+
+def compute(data):
+    """从原始数据计算所有指标"""
+    closes = data["closes"]
+    volumes = data["volumes"]
+
+    close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else close
+    change_pct = ((close - prev_close) / prev_close) * 100 if prev_close > 0 else 0
+
+    sma20  = sma(closes, 20)
+    sma50  = sma(closes, 50)
+    sma200 = sma(closes, 200)
+
+    # 量比: 今日 / 20日均量
+    vol_today = volumes[-1] if volumes and volumes[-1] else 0
+    vol_ratio = None
+    valid_vols = [v for v in volumes[-21:-1] if v and v > 0]
+    if valid_vols and vol_today > 0:
+        avg_vol = sum(valid_vols) / len(valid_vols)
+        vol_ratio = vol_today / avg_vol if avg_vol > 0 else None
+
+    # 趋势
+    trend = "unknown"
+    if sma200:
+        trend = "above" if close > sma200 else "below"
+
+    return {
+        "close": close,
+        "prev_close": prev_close,
+        "open": data["opens"][-1] if data["opens"] else None,
+        "high": data["highs"][-1] if data["highs"] else None,
+        "low":  data["lows"][-1]  if data["lows"]  else None,
+        "volume": vol_today,
+        "sma20":  round(sma20, 2)  if sma20  else None,
+        "sma50":  round(sma50, 2)  if sma50  else None,
+        "sma200": round(sma200, 2) if sma200 else None,
+        "change_pct": round(change_pct, 2),
+        "vol_ratio": round(vol_ratio, 1) if vol_ratio else None,
+        "trend": trend,
+    }
+
+
+# ── 格式化 ───────────────────────────────────────────
+
+def fp(v):     return f"${v:,.2f}" if v is not None else "—"
+def fpct(v):   return f"{'+' if v >= 0 else ''}{v:.2f}%" if v is not None else "—"
+def fr(v):     return f"{v:.1f}×" if v is not None else "—"
+
+def emoji(pct):
+    if pct is None:  return "⚪"
+    if pct > 5:      return "🔥"
+    if pct > 2:      return "🟢"
+    if pct > 0:      return "🟢"
+    if pct > -2:     return "🔴"
+    if pct > -5:     return "🔴"
+    return "🩸"
+
+def trend_label(m):
+    t = (m or {}).get("trend")
+    if t == "above": return "🟢 线上"
+    if t == "below": return "🔴 线下"
+    return "—"
+
+
+# ── 信号检测 ─────────────────────────────────────────
+
+def signals(sym, name, m):
+    if not m:
+        return []
+    sigs = []
+    c, s20, s50, s200, vr = m["close"], m["sma20"], m["sma50"], m["sma200"], m["vol_ratio"]
+    pc = m["prev_close"]
+
+    if c and s20 and s50 and s200:
+        if c > s20 > s50 > s200:
+            sigs.append("🟢 完美多头")
+        elif c < s20 < s50 < s200:
+            sigs.append("🔴 完美空头")
+        elif s20 > s200 and c > s200 and s20 > s50:
+            sigs.append("🟢 短期偏多")
+        elif s20 < s200 and c < s200 and s20 < s50:
+            sigs.append("🔴 短期偏空")
+    if s200 and c:
+        if c > s200 and pc <= s200:
+            sigs.append("⬆️ 突破 200 日线")
+        elif c < s200 and pc >= s200:
+            sigs.append("⬇️ 跌破 200 日线")
+    if vr and vr > 2.0:
+        sigs.append(f"📈 爆量 {vr:.1f}×")
+    return sigs
+
+
+# ── 报告生成 ─────────────────────────────────────────
+
+GROUPS = [
+    ("📊 大盘风向",     "benchmarks"),
+    ("🧠 AI 核心龙头",  "ai"),
+    ("🔬 半导体 & 上游", "semi"),
+    ("📡 光通信",       "optical"),
+    ("💾 存储 & 内存",   "storage"),
+    ("📦 AI / 半导体 ETF", "etfs"),
+]
+
+
+def build_report(date_str, results):
+    out = []
+    out.append(f"# 🇺🇸 美股 AI 板块收盘报告")
+    out.append(f"**{date_str}** · {datetime.utcnow().strftime('%H:%M UTC')}")
+    out.append("")
+
+    for title, group_key in GROUPS:
+        members = [(s, m) for s, m in WATCHLIST.items() if m["group"] == group_key]
+        if not members:
             continue
-        lines.append(f"## {title}")
-        lines.append("")
-        lines.append("| 代码 | 名称 | 收盘价 | 日涨跌 | SMA 20 | SMA 50 | SMA 200 | 量比 |")
-        lines.append("|------|------|--------|--------|--------|--------|---------|------|")
+        out.append(f"## {title}")
+        out.append("")
+        out.append("| 代码 | 名称 | 收盘 | 涨跌 | SMA20 | SMA50 | SMA200 | 趋势 |")
+        out.append("|------|------|------|------|-------|-------|--------|------|")
+        for sym, meta in members:
+            m = results.get(sym)
+            if m:
+                out.append(
+                    f"| {emoji(m['change_pct'])} {sym} "
+                    f"| {meta['name']} "
+                    f"| {fp(m['close'])} "
+                    f"| {fpct(m['change_pct'])} "
+                    f"| {fp(m['sma20'])} "
+                    f"| {fp(m['sma50'])} "
+                    f"| {fp(m['sma200'])} "
+                    f"| {trend_label(m)} |"
+                )
+            else:
+                out.append(f"| {sym} | {meta['name']} | — | — | — | — | — | — |")
+        out.append("")
 
-        for sym in syms:
-            try:
-                df = data['Close'][sym].dropna()
-                row = build_stock_row(sym, data, df, table_mode="sector")
-                lines.append(row)
-            except KeyError:
-                name = WATCHLIST.get(sym, {}).get('name', sym)
-                lines.append(f"| {sym} | {name} | — | — | — | — | — | — |")
+    # 排名
+    ranked = []
+    for sym, m in results.items():
+        if m and m["change_pct"] is not None:
+            ranked.append((sym, WATCHLIST.get(sym, {}).get("name", sym),
+                          m["change_pct"], m["close"]))
+    ranked.sort(key=lambda x: x[2], reverse=True)
 
-        lines.append("")
+    out.append("## 🏆 日内排名")
+    out.append("")
+    out.append("**🔥 涨幅 TOP 5**")
+    for i, (sym, name, pct, close) in enumerate(ranked[:5], 1):
+        out.append(f"{i}. {emoji(pct)} **{sym}** ({name})　{fpct(pct)}　→ {fp(close)}")
+    out.append("")
+    out.append("**⚠️ 跌幅 TOP 5**")
+    for i, (sym, name, pct, close) in enumerate(ranked[-5:][::-1], 1):
+        out.append(f"{i}. {emoji(pct)} **{sym}** ({name})　{fpct(pct)}　→ {fp(close)}")
+    out.append("")
 
-    # ── 日内强弱榜 ──────────────────────────────────
-    lines.append("## 🏆 日内涨跌排名")
-    lines.append("")
-    lines.append("### 涨幅 TOP 5")
-    lines.append("")
-    gains = []
-    for sym in WATCHLIST:
-        try:
-            df = data['Close'][sym].dropna()
-            pct = (df.iloc[-1] / df.iloc[-2] - 1) * 100
-            gains.append((sym, WATCHLIST[sym]['name'], pct))
-        except (KeyError, IndexError):
-            continue
-    gains.sort(key=lambda x: x[2], reverse=True)
-
-    for i, (sym, name, pct) in enumerate(gains[:5]):
-        emoji = emoji_for_change(pct)
-        lines.append(f"{i+1}. {emoji} **{sym}** ({name}): {format_pct(pct)}")
-
-    lines.append("")
-    lines.append("### 跌幅 TOP 5")
-    lines.append("")
-    for i, (sym, name, pct) in enumerate(gains[-5:]):
-        emoji = emoji_for_change(pct)
-        lines.append(f"{i+1}. {emoji} **{sym}** ({name}): {format_pct(pct)}")
-
-    lines.append("")
-
-    # ── 信号提示 ─────────────────────────────────────
-    lines.append("## ⚡ 技术信号")
-    lines.append("")
-    signals = []
-
-    for sym in WATCHLIST:
-        try:
-            df = data['Close'][sym].dropna()
-            if len(df) < 200:
-                continue
-            close = df.iloc[-1]
-            prev_close = df.iloc[-2]
-            smas = compute_smas(df, SMA_PERIODS)
-            sma20, sma50, sma200 = smas.get(20), smas.get(50), smas.get(200)
-
-            if sma20 and sma50 and sma200:
-                if close > sma20 > sma50:
-                    # 短期强势
-                    if sma20 > sma200 and close > sma200:
-                        signals.append((sym, WATCHLIST[sym]['name'], "🟢 多头排列", "strong"))
-                if close < sma20 < sma50 and sma50 < sma200:
-                    signals.append((sym, WATCHLIST[sym]['name'], "🔴 空头排列", "weak"))
-
-            # 量比异常
-            vol_ratio = compute_volume_ratio(data['Volume'][sym].dropna()
-                                             if 'Volume' in data.columns
-                                             else None)
-            if vol_ratio is None:
-                try:
-                    vol_df = data['Volume'][sym].dropna()
-                    vol_ratio = compute_volume_ratio(vol_df)
-                except (KeyError, AttributeError):
-                    pass
-
-            if vol_ratio and vol_ratio > 2.0:
-                signals.append((sym, WATCHLIST[sym]['name'],
-                              f"📈 爆量 {vol_ratio:.1f}×", "volume"))
-        except (KeyError, IndexError):
-            continue
-
-    if signals:
-        for sym, name, signal, _ in signals[:15]:
-            lines.append(f"- **{sym}** ({name}): {signal}")
+    # 信号
+    all_sigs = []
+    for sym, m in results.items():
+        name = WATCHLIST.get(sym, {}).get("name", sym)
+        for s in signals(sym, name, m):
+            all_sigs.append((sym, name, s))
+    out.append("## ⚡ 技术信号")
+    out.append("")
+    if all_sigs:
+        for sym, name, sig in all_sigs:
+            out.append(f"- **{sym}** ({name}): {sig}")
     else:
-        lines.append("- 暂无显著信号")
+        out.append("- 今日暂无显著信号")
 
-    lines.append("")
-    lines.append("---")
-    lines.append(f"*由 daily-report.py 自动生成 · 数据来源: Yahoo Finance*")
-    lines.append("")
-    lines.append("*⚠️ 仅供研究参考，不构成投资建议*")
-
-    return "\n".join(lines)
+    out.append("")
+    out.append("---")
+    out.append(f"*Yahoo Finance · 自动生成 · {len(results)}/{len(WATCHLIST)} 只 · 仅供参考*")
+    return "\n".join(out)
 
 
-def build_stock_row(sym, data, closes, table_mode="full"):
-    """构造单行数据"""
-    name = WATCHLIST.get(sym, {}).get('name', sym)
-
-    if closes is None or len(closes) < 2:
-        return f"| {sym} | {name} | — | — | — | — | — | — | — |"
-
-    close = closes.iloc[-1]
-    prev_close = closes.iloc[-2] if len(closes) >= 2 else close
-    change_pct = (close / prev_close - 1) * 100
-    emoji = emoji_for_change(change_pct)
-
-    smas = compute_smas(closes, SMA_PERIODS)
-    sma20_str = format_price(smas[20])
-    sma50_str = format_price(smas[50])
-    sma200_str = format_price(smas[200])
-
-    # 趋势方向
-    trend = ""
-    if smas[200] and close > smas[200]:
-        trend = "🟢 线上"
-    elif smas[200]:
-        trend = "🔴 线下"
-    else:
-        trend = "—"
-
-    vol_ratio_str = "—"
-    try:
-        vol_df = data['Volume'][sym].dropna()
-        vol_ratio = compute_volume_ratio(vol_df)
-        if vol_ratio:
-            vol_ratio_str = f"{vol_ratio:.1f}×"
-    except (KeyError, AttributeError):
-        pass
-
-    if table_mode == "full":
-        return (f"| {emoji} {sym} | {name} | {format_price(close)} "
-                f"| {format_pct(change_pct)} | {sma20_str} | {sma50_str} "
-                f"| {sma200_str} | {vol_ratio_str} | {trend} |")
-    else:
-        return (f"| {emoji} {sym} | {name} | {format_price(close)} "
-                f"| {format_pct(change_pct)} | {sma20_str} | {sma50_str} "
-                f"| {sma200_str} | {vol_ratio_str} |")
-
-
-# ── 入口 ──────────────────────────────────────────────
+# ── 主流程 ───────────────────────────────────────────
 
 def main():
-    save = "--save" in sys.argv
-    end_date = None
+    tickers_arg = next((a.split("=")[1] for a in sys.argv
+                        if a.startswith("--tickers=")), None)
+    symbols = [t.strip().upper() for t in tickers_arg.split(",")] \
+              if tickers_arg else list(WATCHLIST.keys())
 
-    for i, arg in enumerate(sys.argv):
-        if arg == "--today" and i + 1 < len(sys.argv):
-            end_date = sys.argv[i + 1]
+    print(f"📡 拉取 {len(symbols)} 只标的数据...", file=sys.stderr)
+    results = {}
+    for i, ticker in enumerate(symbols):
+        print(f"  [{i+1}/{len(symbols)}] {ticker}...", file=sys.stderr)
+        data = fetch(ticker)
+        if data:
+            m = compute(data)
+            if m:
+                results[ticker] = m
+        if i < len(symbols) - 1:
+            time.sleep(0.3)
 
-    data, end_date = fetch_all(WATCHLIST, end_date)
-    report = build_report(data, end_date)
-
-    print(report)
-
-    if save:
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        fname = f"report-{end_date}.md"
-        fpath = REPORT_DIR / fname
-        fpath.write_text(report)
-        print(f"\n💾 已保存: {fpath}")
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    print(f"✅ {len(results)}/{len(symbols)} 成功", file=sys.stderr)
+    print(build_report(date_str, results))
 
 
 if __name__ == "__main__":
