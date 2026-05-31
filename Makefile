@@ -8,6 +8,9 @@
 #   make download-storage   # 仅存储
 #   make download-ai        # 仅 AI 龙头
 #   make download-etfs      # 仅 ETF
+#   make report             # 生成本日收盘报告
+#   make report-save        # 生成本日报告并保存
+#   make dry-run            # 预览所有操作
 #   make dry-run            # 预览所有操作
 #   make info               # 显示数据状态
 #   make clean              # 删除本地数据
@@ -19,7 +22,11 @@ DATA    := ./data
 
 .PHONY: help download dry-run info clean \
         download-optical download-semicon download-storage \
-        download-ai download-etfs download-bench
+        download-ai download-etfs download-bench \
+        report report-save install-report-deps
+
+help:
+	@head -18 Makefile
 
 help:
 	@head -18 Makefile
@@ -91,3 +98,14 @@ clean:
 		         echo "✅ 已清理";; \
 		* ) echo "已取消";; \
 	esac
+
+# ── 收盘报告 ──────────────────────────────────────
+install-report-deps:
+	@pip install yfinance pandas numpy
+
+report:
+	@python3 scripts/report-bot/daily-report.py
+
+report-save:
+	@python3 scripts/report-bot/daily-report.py --save
+	@echo "📁 报告已保存到 reports/"
