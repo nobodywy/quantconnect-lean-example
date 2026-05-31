@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  lean:
+    image: quantconnect/lean:latest
+    container_name: lean-engine
+    environment:
+      # ── QuantConnect credentials ──────────────────────────────
+      - QC_USER_ID=${QC_USER_ID:-}
+      - QC_API_TOKEN=${QC_API_TOKEN:-}
+
+      # ── algorithm configuration ───────────────────────────────
+      - LEAN_ALGORITHM_LANGUAGE=Python
+      - LEAN_ALGORITHM_LOCATION=/Lean/Launcher/bin/Debug/algorithms/SmaCrossAlgorithm.py
+    volumes:
+      - ./algorithms:/Lean/Launcher/bin/Debug/algorithms:ro
+      - ./data:/Lean/Data
+      - ./notebooks:/Lean/Launcher/bin/Debug/notebooks
+      - ./lean.json:/Lean/Launcher/bin/Debug/lean.json:ro
+      - ./config.json:/Lean/Launcher/bin/Debug/config.json:ro
+    # Uncomment to run a one-shot backtest:
+    # command: ["dotnet", "QuantConnect.Lean.Launcher.dll", "--backtest"]
+    # For interactive use, keep container alive:
+    stdin_open: true
+    tty: true

@@ -1,0 +1,36 @@
+{
+  "organization-id": "",
+  "cloud-id": "",
+  "version": 1,
+  "default-organization": true,
+
+  "algorithm-language": "Python",
+  "algorithm-location": "algorithms/SmaCrossAlgorithm.py",
+
+  "data-folder": "data",
+  "research-notebooks": "notebooks",
+
+  "environments": {
+    "backtesting": {
+      "live-mode": false,
+      "live-mode-url": "",
+      "lean-cli-root": ".",
+      "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+      "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+      "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+      "organization-id": "",
+      "image": "quantconnect/lean:latest",
+      "compose-file": "docker-compose.yml"
+    },
+    "live": {
+      "live-mode": true,
+      "live-mode-url": "wss://www.quantconnect.com/api/v2/live/data",
+      "data-provider": "QuantConnect.Lean.Engine.DataFeeds.ApiDataProvider",
+      "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+      "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+      "organization-id": "",
+      "image": "quantconnect/lean:latest",
+      "compose-file": "docker-compose.yml"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "environment": "backtesting",
+  "algorithm-type-name": "SmaCrossAlgorithm",
+  "algorithm-language": "Python",
+  "algorithm-location": "algorithms/SmaCrossAlgorithm.py",
+
+  "data-folder": "data",
+  "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+  "map-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskMapFileProvider",
+  "factor-file-provider": "QuantConnect.Data.Auxiliary.LocalDiskFactorFileProvider",
+
+  "parameters": {},
+
+  "algorithm-manager-time-loop-maximum": 20,
+  "data-permission-manager": "QuantConnect.Data.DataPermissionManager",
+  "object-store": "QuantConnect.Lean.Engine.Storage.LocalObjectStore",
+
+  "transaction-handler": "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler",
+  "live-mode": false,
+  "live-mode-url": "",
+
+  "messaging-handler": "QuantConnect.Messaging.Messaging",
+  "job-queue-handler": "QuantConnect.Queues.JobQueue",
+  "api-handler": "QuantConnect.Api.Api",
+
+  "job-user-id": "0",
+  "api-access-token": "",
+  "organization-id": "",
+
+  "composer-dll-directory": ".",
+  "debugging": false,
+  "results-destination-folder": "results",
+
+  "log-level": "trace",
+  "close-automatically": true
+}

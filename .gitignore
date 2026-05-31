@@ -1,0 +1,33 @@
+# Lean engine artifacts
+results/
+storage/
+cache/
+__pycache__/
+
+# Data (large files - managed separately via LEAN CLI)
+data/equity/
+data/forex/
+data/future/
+data/option/
+data/crypto/
+data/alternative/
+
+# Python
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Keep placeholder
+!data/.gitkeep

@@ -1,0 +1,7 @@
+# LEAN CLI is the primary dependency for local development.
+# Install via: pip install lean
+
+# For research / analysis outside the LEAN engine:
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
